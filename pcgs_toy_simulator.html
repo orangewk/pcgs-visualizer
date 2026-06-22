@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Complex Gaussian Splat Cloud Toy Simulator</title>
+<style>
+  :root { --bg:#0f1117; --panel:#171a22; --ink:#e9edf1; --muted:#a7b0bd; --line:#303746; --accent:#8fb5ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  header { padding:22px 26px 10px; border-bottom:1px solid var(--line); }
+  h1 { margin:0 0 6px; font-size:22px; font-weight:700; }
+  p { color:var(--muted); line-height:1.55; margin:6px 0; }
+  main { display:grid; grid-template-columns: 330px 1fr; gap:18px; padding:18px; }
+  @media (max-width: 900px) { main { grid-template-columns:1fr; } }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px; }
+  .controls label { display:grid; grid-template-columns: 1fr 66px; align-items:center; gap:10px; margin:14px 0 7px; color:var(--ink); font-size:13px; }
+  .controls input[type="range"] { width:100%; }
+  .value { color:var(--accent); text-align:right; font-variant-numeric: tabular-nums; }
+  .buttons { display:flex; gap:8px; flex-wrap:wrap; margin-top:14px; }
+  button { background:#222838; color:var(--ink); border:1px solid #3a455e; border-radius:10px; padding:9px 12px; cursor:pointer; }
+  button:hover { background:#283148; }
+  canvas { width:100%; height:auto; display:block; background:#0b0d12; border:1px solid var(--line); border-radius:12px; }
+  .caption { font-size:12px; color:var(--muted); margin-top:10px; }
+  .math { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color:#d9e2ff; background:#10131b; border:1px solid var(--line); border-radius:10px; padding:10px; overflow:auto; }
+  .small { font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Complex Gaussian Splat Cloud Toy Simulator</h1>
+  <p>3DGSの語彙に「矢印＝複素位相」を足すと、density render と event render、干渉、デコヒーレンスをどう見られるかを示す最小模型です。</p>
+</header>
+<main>
+  <section class="panel controls">
+    <h2 style="font-size:16px;margin:0 0 12px;">Parameters</h2>
+    <label>relative phase Δφ <span id="phaseVal" class="value"></span></label>
+    <input id="phase" type="range" min="0" max="6.28318" step="0.01" value="0.0" />
+
+    <label>momentum / stripe k <span id="kVal" class="value"></span></label>
+    <input id="k" type="range" min="0" max="20" step="0.1" value="8.0" />
+
+    <label>splat width σ <span id="sigmaVal" class="value"></span></label>
+    <input id="sigma" type="range" min="0.15" max="2.0" step="0.01" value="0.62" />
+
+    <label>separation d <span id="dVal" class="value"></span></label>
+    <input id="d" type="range" min="0" max="4.0" step="0.02" value="1.6" />
+
+    <label>coherence λ <span id="lambdaVal" class="value"></span></label>
+    <input id="lambda" type="range" min="0" max="1" step="0.01" value="1" />
+
+    <label>event samples <span id="nVal" class="value"></span></label>
+    <input id="n" type="range" min="0" max="3000" step="10" value="400" />
+
+    <div class="buttons">
+      <button id="randomize">sample again</button>
+      <button id="animate">animate phase</button>
+      <button id="reset">reset</button>
+    </div>
+
+    <p class="caption">λ=1 は完全に干渉する「矢印つき splat」。λ=0 は環境へ位相関係が漏れた後の mixture、つまり古典的な足し算に近い状態です。</p>
+
+    <div class="math small">
+      ψ₁ = G(x+d/2) exp(+ikx)<br>
+      ψ₂ = G(x-d/2) exp(-ikx+iΔφ)<br>
+      P = |ψ₁|² + |ψ₂|² + 2λ Re(ψ₁*ψ₂)<br>
+      event render: x_obs ~ P(x)
+    </div>
+  </section>
+
+  <section class="panel">
+    <canvas id="plot" width="1100" height="640"></canvas>
+    <p class="caption">上段: density render = 確率場 P(x)。縦棒は event render のサンプルヒストグラム。下段: 2つの splat の位相矢印。矢印の相対角が揃う場所は明るく、逆向きの場所は暗くなる。</p>
+  </section>
+</main>
+<script>
+const el = id => document.getElementById(id);
+const canvas = el('plot');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const sliders = ['phase','k','sigma','d','lambda','n'];
+let anim = false;
+let seed = 1234567;
+function rnd(){ seed = (1664525 * seed + 1013904223) >>> 0; return seed / 4294967296; }
+function gauss(x, mu, s){ return Math.exp(-0.5 * Math.pow((x-mu)/s,2)); }
+function params(){ return {
+  phase: +el('phase').value, k:+el('k').value, sigma:+el('sigma').value, d:+el('d').value, lambda:+el('lambda').value, n:+el('n').value|0
+};}
+function updateLabels(p){
+  el('phaseVal').textContent = p.phase.toFixed(2);
+  el('kVal').textContent = p.k.toFixed(1);
+  el('sigmaVal').textContent = p.sigma.toFixed(2);
+  el('dVal').textContent = p.d.toFixed(2);
+  el('lambdaVal').textContent = p.lambda.toFixed(2);
+  el('nVal').textContent = p.n.toString();
+}
+function probAt(x,p){
+  const a1 = gauss(x, -p.d/2, p.sigma);
+  const a2 = gauss(x,  p.d/2, p.sigma);
+  const theta1 =  p.k*x;
+  const theta2 = -p.k*x + p.phase;
+  const interference = 2*p.lambda*a1*a2*Math.cos(theta2-theta1);
+  return Math.max(0, a1*a1 + a2*a2 + interference);
+}
+function computeGrid(p){
+  const xs=[], ys=[]; const N=900; const xmin=-5, xmax=5; let ymax=0, sum=0;
+  for(let i=0;i<N;i++){
+    const x = xmin+(xmax-xmin)*i/(N-1); const y=probAt(x,p);
+    xs.push(x); ys.push(y); ymax=Math.max(ymax,y); sum += y;
+  }
+  return {xs,ys,ymax:ymax||1,sum};
+}
+function sampleFromGrid(grid, p){
+  const cdf=[]; let s=0; for(const y of grid.ys){ s+=y; cdf.push(s); }
+  const samples=[]; const xmin=-5, xmax=5; const N=grid.ys.length;
+  for(let m=0;m<p.n;m++){
+    const u=rnd()*s; let lo=0, hi=N-1;
+    while(lo<hi){ const mid=(lo+hi)>>1; if(cdf[mid]<u) lo=mid+1; else hi=mid; }
+    const jitter=(rnd()-0.5)*(xmax-xmin)/N;
+    samples.push(xmin+(xmax-xmin)*lo/(N-1)+jitter);
+  }
+  return samples;
+}
+function X(x){ return 65 + (x+5)/10*(W-100); }
+function drawAxes(y0,h,label){
+  ctx.strokeStyle='#303746'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(55,y0+h); ctx.lineTo(W-35,y0+h); ctx.stroke();
+  ctx.fillStyle='#a7b0bd'; ctx.font='14px system-ui'; ctx.fillText(label, 58, y0+18);
+  for(let x=-4;x<=4;x+=2){ ctx.fillText(String(x), X(x)-5, y0+h+18); }
+}
+function draw(){
+  const p=params(); updateLabels(p); const grid=computeGrid(p); const samples=sampleFromGrid(grid,p);
+  ctx.clearRect(0,0,W,H); ctx.fillStyle='#0b0d12'; ctx.fillRect(0,0,W,H);
+  // top probability plot
+  const y0=30, h=260; drawAxes(y0,h,'density render: P(x) = |Σ complex splats|²');
+  // histogram
+  const bins=120; const hist=new Array(bins).fill(0); for(const x of samples){ const b=Math.floor((x+5)/10*bins); if(b>=0&&b<bins) hist[b]++; }
+  const hmax=Math.max(1,...hist);
+  ctx.fillStyle='rgba(160,190,255,0.28)';
+  for(let b=0;b<bins;b++){
+    const x1=65+b/bins*(W-100); const bw=(W-100)/bins;
+    const bh=hist[b]/hmax*95;
+    ctx.fillRect(x1,y0+h-bh,bw, bh);
+  }
+  // probability curve
+  ctx.strokeStyle='#e9edf1'; ctx.lineWidth=2; ctx.beginPath();
+  grid.xs.forEach((x,i)=>{ const xx=X(x); const yy=y0+h-grid.ys[i]/grid.ymax*210; if(i===0)ctx.moveTo(xx,yy); else ctx.lineTo(xx,yy); }); ctx.stroke();
+  // component density faint curves
+  ctx.strokeStyle='rgba(143,181,255,0.35)'; ctx.lineWidth=1; ctx.beginPath();
+  grid.xs.forEach((x,i)=>{ const yy=y0+h-Math.pow(gauss(x,-p.d/2,p.sigma),2)/grid.ymax*210; const xx=X(x); if(i===0)ctx.moveTo(xx,yy); else ctx.lineTo(xx,yy); }); ctx.stroke();
+  ctx.beginPath(); grid.xs.forEach((x,i)=>{ const yy=y0+h-Math.pow(gauss(x,p.d/2,p.sigma),2)/grid.ymax*210; const xx=X(x); if(i===0)ctx.moveTo(xx,yy); else ctx.lineTo(xx,yy); }); ctx.stroke();
+
+  // bottom arrows
+  const y1=355, hh=210; drawAxes(y1,hh,'phase arrows carried by two Gaussian splats');
+  const arrowXs=[]; for(let x=-4.5;x<=4.5;x+=0.5) arrowXs.push(x);
+  for(const x of arrowXs){
+    const a1=gauss(x,-p.d/2,p.sigma); const a2=gauss(x,p.d/2,p.sigma);
+    drawArrow(X(x), y1+75, 22*a1, p.k*x, 'rgba(143,181,255,0.85)');
+    drawArrow(X(x), y1+145, 22*a2, -p.k*x+p.phase, 'rgba(255,202,142,0.85)');
+    // vector sum
+    const vx = a1*Math.cos(p.k*x) + a2*Math.cos(-p.k*x+p.phase);
+    const vy = a1*Math.sin(p.k*x) + a2*Math.sin(-p.k*x+p.phase);
+    drawArrow(X(x), y1+110, 20*Math.sqrt(vx*vx+vy*vy), Math.atan2(vy,vx), 'rgba(233,237,241,0.88)');
+  }
+  ctx.fillStyle='#8fb5ff'; ctx.fillText('splat 1', 60, y1+80);
+  ctx.fillStyle='#ffca8e'; ctx.fillText('splat 2', 60, y1+150);
+  ctx.fillStyle='#e9edf1'; ctx.fillText('sum', 60, y1+115);
+
+  // legend / formula
+  ctx.fillStyle='#a7b0bd'; ctx.font='13px system-ui';
+  ctx.fillText('coherence λ scales only the interference term. Reduce λ to see decoherence: arrows still exist in the model, but their relative phase no longer appears in the visible density.', 60, H-24);
+}
+function drawArrow(x,y,len,theta,color){
+  if(len<1) return;
+  const dx=len*Math.cos(theta), dy=len*Math.sin(theta);
+  ctx.strokeStyle=color; ctx.fillStyle=color; ctx.lineWidth=1.6;
+  ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(x+dx,y-dy); ctx.stroke();
+  const ang=Math.atan2(-dy,dx); const ah=5;
+  ctx.beginPath();
+  ctx.moveTo(x+dx,y-dy);
+  ctx.lineTo(x+dx-ah*Math.cos(ang-0.55), y-dy-ah*Math.sin(ang-0.55));
+  ctx.lineTo(x+dx-ah*Math.cos(ang+0.55), y-dy-ah*Math.sin(ang+0.55));
+  ctx.closePath(); ctx.fill();
+}
+sliders.forEach(id=>el(id).addEventListener('input', draw));
+el('randomize').addEventListener('click', ()=>{ seed=(Math.random()*4294967296)>>>0; draw(); });
+el('reset').addEventListener('click', ()=>{ el('phase').value=0; el('k').value=8; el('sigma').value=0.62; el('d').value=1.6; el('lambda').value=1; el('n').value=400; seed=1234567; draw(); });
+el('animate').addEventListener('click', ()=>{ anim=!anim; el('animate').textContent=anim?'stop animation':'animate phase'; if(anim) requestAnimationFrame(tick); });
+function tick(){ if(!anim) return; let v=+el('phase').value+0.035; if(v>6.28318) v-=6.28318; el('phase').value=v.toFixed(4); draw(); requestAnimationFrame(tick); }
+draw();
+</script>
+</body>
+</html>
